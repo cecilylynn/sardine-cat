@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sardine Cat Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #2d1b2e; touch-action: none; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #ui {
+    position: fixed; top: 12px; left: 12px;
+    font-family: monospace; font-size: 20px; color: #fff;
+    text-shadow: 2px 2px 0 #000; z-index: 10; pointer-events: none;
+  }
+  #title-screen {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #4a7a5b; font-family: monospace; color: #fff;
+  }
+  #title-screen h1 { font-size: 28px; margin-bottom: 8px; text-shadow: 3px 3px 0 #2d5a3e; }
+  #title-screen p { font-size: 14px; margin-bottom: 24px; opacity: 0.8; }
+  #title-screen .start-btn {
+    font-family: monospace; font-size: 18px; padding: 12px 32px;
+    background: #e8a87c; border: none; color: #3b2314; cursor: pointer;
+    border-radius: 4px; text-shadow: none;
+  }
+  #title-screen .start-btn:hover { background: #f0c49b; }
+  #dpad {
+    position: fixed; bottom: 24px; left: 24px; z-index: 10;
+    width: 140px; height: 140px; display: none;
+  }
+  .dpad-btn {
+    position: absolute; width: 44px; height: 44px;
+    background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);
+    border-radius: 8px; font-size: 20px; color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none; -webkit-user-select: none;
+  }
+  .dpad-btn:active { background: rgba(255,255,255,0.5); }
+  .dpad-up { top: 0; left: 48px; }
+  .dpad-down { bottom: 0; left: 48px; }
+  .dpad-left { top: 48px; left: 0; }
+  .dpad-right { top: 48px; right: 0; }
+</style>
+</head>
+<body>
+
+<div id="title-screen">
+  <h1>Sardine Cat</h1>
+  <p>Explore the world and collect sardines!</p>
+  <button class="start-btn" id="start-btn">Play</button>
+</div>
+
+<div id="ui">
+  <span id="sardine-count">Sardines: 0</span>
+</div>
+
+<div id="dpad">
+  <div class="dpad-btn dpad-up" data-dir="up">&#9650;</div>
+  <div class="dpad-btn dpad-down" data-dir="down">&#9660;</div>
+  <div class="dpad-btn dpad-left" data-dir="left">&#9664;</div>
+  <div class="dpad-btn dpad-right" data-dir="right">&#9654;</div>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const TILE = 16;
+const SCALE = 3;
+const TS = TILE * SCALE; // rendered tile size
+
+// ---- MAP ----
+// 0=grass, 1=flowers, 2=water, 3=tree, 4=path, 5=dark grass, 6=sand, 7=bush
+const MAP_W = 40, MAP_H = 30;
+const map = [];
+
+function generateMap() {
+  // Fill with grass
+  for (let y = 0; y < MAP_H; y++) {
+    map[y] = [];
+    for (let x = 0; x < MAP_W; x++) {
+      map[y][x] = Math.random() < 0.15 ? 1 : 0; // grass or flowers
+    }
+  }
+  // Pond (center-ish)
+  const px = 18, py = 12;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -3; dx <= 3; dx++) {
+    if (dx*dx/9 + dy*dy/4 <= 1) map[py+dy][px+dx] = 2;
+  }
+  // Sand around pond
+  for (let dy = -3; dy <= 3; dy++) for (let dx = -4; dx <= 4; dx++) {
+    const ny = py+dy, nx = px+dx;
+    if (ny >= 0 && ny < MAP_H && nx >= 0 && nx < MAP_W && map[ny][nx] !== 2) {
+      if (dx*dx/16 + dy*dy/9 <= 1 && map[ny][nx] !== 2) map[ny][nx] = 6;
+    }
+  }
+  // Paths
+  for (let x = 5; x < 35; x++) { map[15][x] = 4; map[16][x] = 4; }
+  for (let y = 5; y < 25; y++) { map[y][10] = 4; map[y][11] = 4; }
+  for (let y = 5; y < 25; y++) { map[y][28] = 4; map[y][29] = 4; }
+  // Trees scattered
+  const treePositions = [
+    [2,2],[5,3],[8,1],[13,3],[22,2],[30,4],[35,2],[37,5],
+    [1,8],[6,10],[3,18],[7,22],[1,26],[5,27],
+    [33,8],[36,12],[38,18],[35,22],[37,26],[33,27],
+    [14,6],[25,6],[14,24],[25,24],[20,4],[20,26],
+    [0,0],[39,0],[0,29],[39,29],[15,1],[24,1],[15,28],[24,28],
+  ];
+  for (const [tx,ty] of treePositions) {
+    if (ty < MAP_H && tx < MAP_W) map[ty][tx] = 3;
+  }
+  // Bushes
+  const bushPositions = [
+    [4,5],[9,7],[12,11],[27,9],[31,14],[3,20],[8,25],[32,20],[34,25],
+    [16,8],[23,8],[16,22],[23,22],
+  ];
+  for (const [bx,by] of bushPositions) {
+    if (by < MAP_H && bx < MAP_W) map[by][bx] = 7;
+  }
+  // Dark grass patches
+  for (let i = 0; i < 30; i++) {
+    const dx = Math.floor(Math.random()*MAP_W), dy = Math.floor(Math.random()*MAP_H);
+    if (map[dy][dx] === 0) map[dy][dx] = 5;
+  }
+  // Ensure spawn area is clear
+  map[15][5] = 4; map[15][6] = 4; map[16][5] = 4; map[16][6] = 4;
+}
+generateMap();
+
+function isWalkable(tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return false;
+  const t = map[ty][tx];
+  return t !== 2 && t !== 3 && t !== 7; // water, tree, bush block
+}
+
+// ---- COLORS ----
+const COLORS = {
+  grass:     ['#6abe5e','#5eaa52'],
+  flowers:   ['#6abe5e','#e87fa0','#f0e050','#82d4f0'],
+  water:     ['#4a8fb8','#5ca0c8','#3a7fa8'],
+  tree_trunk:'#8b6040',
+  tree_top:  ['#3a8a3e','#2e7a32','#4a9a4e'],
+  path:      ['#d4b896','#c8a880'],
+  dark_grass:['#509848','#448840'],
+  sand:      ['#e8d8a8','#dcc898'],
+  bush:      ['#3a8a3e','#2e7a32'],
+};
+
+// ---- DRAW TILES ----
+function drawTile(x, y, type) {
+  const sx = x * TS, sy = y * TS;
+  switch(type) {
+    case 0: // grass
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.grass[0] : COLORS.grass[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      break;
+    case 1: // flowers
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.grass[0] : COLORS.grass[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      // draw tiny flowers
+      const seed = x * 31 + y * 17;
+      for (let i = 0; i < 3; i++) {
+        const fx = sx + ((seed * (i+1) * 7) % (TS-8)) + 4;
+        const fy = sy + ((seed * (i+1) * 13) % (TS-8)) + 4;
+        ctx.fillStyle = COLORS.flowers[1 + (i % 3)];
+        ctx.fillRect(fx, fy, SCALE*2, SCALE*2);
+      }
+      break;
+    case 2: // water
+      const wt = Date.now() / 800;
+      const wi = Math.floor(wt + x*0.5 + y*0.3) % 3;
+      ctx.fillStyle = COLORS.water[wi];
+      ctx.fillRect(sx, sy, TS, TS);
+      // wave highlights
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      const wo = Math.sin(wt + x + y) * SCALE * 2;
+      ctx.fillRect(sx + 4*SCALE + wo, sy + 4*SCALE, 6*SCALE, SCALE);
+      break;
+    case 3: // tree
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.grass[0] : COLORS.grass[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      // trunk
+      ctx.fillStyle = COLORS.tree_trunk;
+      ctx.fillRect(sx + 6*SCALE, sy + 10*SCALE, 4*SCALE, 6*SCALE);
+      // canopy
+      ctx.fillStyle = COLORS.tree_top[0];
+      ctx.fillRect(sx + 2*SCALE, sy + 2*SCALE, 12*SCALE, 9*SCALE);
+      ctx.fillStyle = COLORS.tree_top[1];
+      ctx.fillRect(sx + 4*SCALE, sy + 1*SCALE, 8*SCALE, 4*SCALE);
+      ctx.fillStyle = COLORS.tree_top[2];
+      ctx.fillRect(sx + 3*SCALE, sy + 5*SCALE, 4*SCALE, 3*SCALE);
+      break;
+    case 4: // path
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.path[0] : COLORS.path[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      break;
+    case 5: // dark grass
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.dark_grass[0] : COLORS.dark_grass[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      break;
+    case 6: // sand
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.sand[0] : COLORS.sand[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      break;
+    case 7: // bush
+      ctx.fillStyle = (x+y)%2 === 0 ? COLORS.grass[0] : COLORS.grass[1];
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = COLORS.bush[0];
+      ctx.fillRect(sx + 2*SCALE, sy + 4*SCALE, 12*SCALE, 10*SCALE);
+      ctx.fillStyle = COLORS.bush[1];
+      ctx.fillRect(sx + 3*SCALE, sy + 5*SCALE, 5*SCALE, 4*SCALE);
+      // berries
+      ctx.fillStyle = '#e84060';
+      ctx.fillRect(sx + 9*SCALE, sy + 6*SCALE, 2*SCALE, 2*SCALE);
+      ctx.fillRect(sx + 5*SCALE, sy + 10*SCALE, 2*SCALE, 2*SCALE);
+      break;
+  }
+}
+
+// ---- CAT ----
+const cat = {
+  x: 5.5, y: 15.5, // tile coords
+  dir: 0, // 0=down,1=up,2=left,3=right
+  frame: 0,
+  frameTimer: 0,
+  moving: false,
+  speed: 3.5, // tiles per second
+};
+
+function drawCat(screenX, screenY) {
+  const s = SCALE;
+  const f = cat.frame;
+  const d = cat.dir;
+  const x = Math.round(screenX);
+  const y = Math.round(screenY);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fillRect(x + 3*s, y + 14*s, 10*s, 2*s);
+
+  // Body
+  ctx.fillStyle = '#f0a050'; // orange tabby
+  if (d === 0 || d === 1) { // front/back
+    ctx.fillRect(x + 4*s, y + 5*s, 8*s, 8*s);
+    // legs
+    const legOff = cat.moving ? (f === 0 ? s : -s) : 0;
+    ctx.fillRect(x + 4*s, y + 12*s + legOff, 3*s, 3*s);
+    ctx.fillRect(x + 9*s, y + 12*s - legOff, 3*s, 3*s);
+  } else { // side
+    ctx.fillRect(x + 3*s, y + 5*s, 10*s, 7*s);
+    const legOff = cat.moving ? (f === 0 ? s : -s) : 0;
+    ctx.fillRect(x + 4*s, y + 11*s + legOff, 3*s, 3*s);
+    ctx.fillRect(x + 9*s, y + 11*s - legOff, 3*s, 3*s);
+  }
+
+  // Stripes
+  ctx.fillStyle = '#d08030';
+  ctx.fillRect(x + 5*s, y + 6*s, 2*s, s);
+  ctx.fillRect(x + 9*s, y + 6*s, 2*s, s);
+  ctx.fillRect(x + 6*s, y + 9*s, 4*s, s);
+
+  // Head
+  ctx.fillStyle = '#f0a050';
+  ctx.fillRect(x + 3*s, y + 1*s, 10*s, 7*s);
+
+  // Ears
+  ctx.fillStyle = '#f0a050';
+  ctx.fillRect(x + 3*s, y + 0, 3*s, 3*s);
+  ctx.fillRect(x + 10*s, y + 0, 3*s, 3*s);
+  // inner ear
+  ctx.fillStyle = '#f0b8a0';
+  ctx.fillRect(x + 4*s, y + s, s, s);
+  ctx.fillRect(x + 11*s, y + s, s, s);
+
+  // Face
+  if (d !== 1) { // not facing away
+    // Eyes
+    ctx.fillStyle = '#302018';
+    ctx.fillRect(x + 5*s, y + 3*s, 2*s, 2*s);
+    ctx.fillRect(x + 9*s, y + 3*s, 2*s, 2*s);
+    // Eye shine
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x + 5*s, y + 3*s, s, s);
+    ctx.fillRect(x + 9*s, y + 3*s, s, s);
+    // Nose
+    ctx.fillStyle = '#e07080';
+    ctx.fillRect(x + 7*s, y + 5*s, 2*s, s);
+    // Mouth
+    ctx.fillStyle = '#302018';
+    ctx.fillRect(x + 7*s, y + 6*s, s, s);
+    ctx.fillRect(x + 8*s, y + 6*s, s, s);
+    // Whiskers
+    ctx.fillStyle = '#d0d0d0';
+    ctx.fillRect(x + 1*s, y + 5*s, 3*s, s);
+    ctx.fillRect(x + 12*s, y + 5*s, 3*s, s);
+  }
+
+  // Tail
+  ctx.fillStyle = '#f0a050';
+  const tailWag = cat.moving ? Math.sin(Date.now()/150)*2*s : Math.sin(Date.now()/400)*s;
+  if (d === 2) { // facing left, tail on right
+    ctx.fillRect(x + 12*s, y + 6*s + tailWag, 3*s, 2*s);
+    ctx.fillRect(x + 14*s, y + 4*s + tailWag, 2*s, 2*s);
+  } else if (d === 3) { // facing right, tail on left
+    ctx.fillRect(x + 1*s, y + 6*s + tailWag, 3*s, 2*s);
+    ctx.fillRect(x + 0, y + 4*s + tailWag, 2*s, 2*s);
+  } else { // front/back
+    ctx.fillRect(x + 11*s, y + 7*s, 2*s, 2*s);
+    ctx.fillRect(x + 12*s + tailWag, y + 5*s, 2*s, 3*s);
+  }
+}
+
+// ---- SARDINES ----
+let sardines = [];
+let sardineCount = 0;
+const MAX_SARDINES = 12;
+
+function spawnSardine() {
+  let tries = 0;
+  while (tries < 100) {
+    const sx = Math.floor(Math.random() * MAP_W);
+    const sy = Math.floor(Math.random() * MAP_H);
+    if (isWalkable(sx, sy) && !(Math.abs(sx - cat.x) < 2 && Math.abs(sy - cat.y) < 2)) {
+      sardines.push({ x: sx + 0.5, y: sy + 0.5, bobOffset: Math.random() * Math.PI * 2 });
+      return;
+    }
+    tries++;
+  }
+}
+
+function initSardines() {
+  sardines = [];
+  for (let i = 0; i < MAX_SARDINES; i++) spawnSardine();
+}
+initSardines();
+
+function drawSardine(screenX, screenY, bobOffset) {
+  const s = SCALE;
+  const bob = Math.sin(Date.now()/500 + bobOffset) * s;
+  const x = Math.round(screenX);
+  const y = Math.round(screenY + bob);
+  // Sparkle
+  ctx.fillStyle = 'rgba(255,255,200,0.6)';
+  const sp = Math.sin(Date.now()/300 + bobOffset) * 2 * s;
+  ctx.fillRect(x + 2*s + sp, y - 2*s, s, s);
+  ctx.fillRect(x + 8*s - sp, y - s, s, s);
+  // Body
+  ctx.fillStyle = '#a0c0d8';
+  ctx.fillRect(x + 3*s, y + 2*s, 8*s, 4*s);
+  ctx.fillRect(x + 2*s, y + 3*s, 10*s, 2*s);
+  // Belly
+  ctx.fillStyle = '#d0e0e8';
+  ctx.fillRect(x + 4*s, y + 5*s, 6*s, s);
+  // Eye
+  ctx.fillStyle = '#203040';
+  ctx.fillRect(x + 9*s, y + 3*s, s, s);
+  // Tail fin
+  ctx.fillStyle = '#80a8c0';
+  ctx.fillRect(x + s, y + s, 2*s, 2*s);
+  ctx.fillRect(x + s, y + 5*s, 2*s, 2*s);
+}
+
+// ---- PARTICLES ----
+const particles = [];
+
+function spawnParticles(x, y) {
+  for (let i = 0; i < 6; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random()-0.5)*3,
+      vy: -Math.random()*3 - 1,
+      life: 1,
+      color: Math.random() > 0.5 ? '#ffe080' : '#ffa040',
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+    p.vy += 0.05;
+    p.life -= dt * 2;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles(camX, camY) {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - camX, p.y - camY, SCALE*2, SCALE*2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- FLOATING LEAVES ----
+const leaves = [];
+for (let i = 0; i < 15; i++) {
+  leaves.push({
+    x: Math.random() * MAP_W * TS,
+    y: Math.random() * MAP_H * TS,
+    vx: 0.3 + Math.random() * 0.3,
+    vy: 0.5 + Math.random() * 0.5,
+    phase: Math.random() * Math.PI * 2,
+    size: SCALE + Math.floor(Math.random()*SCALE),
+    color: ['#80c040','#60a030','#a0d060'][Math.floor(Math.random()*3)],
+  });
+}
+
+function updateLeaves(dt) {
+  for (const l of leaves) {
+    l.x += (l.vx + Math.sin(l.phase + Date.now()/1000)*0.3) * dt * 60;
+    l.y += l.vy * dt * 60;
+    if (l.y > MAP_H * TS) { l.y = -10; l.x = Math.random() * MAP_W * TS; }
+    if (l.x > MAP_W * TS) l.x = 0;
+  }
+}
+
+function drawLeaves(camX, camY) {
+  ctx.globalAlpha = 0.6;
+  for (const l of leaves) {
+    ctx.fillStyle = l.color;
+    ctx.fillRect(l.x - camX, l.y - camY, l.size, l.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- INPUT ----
+const keys = {};
+const touchDirs = {};
+
+document.addEventListener('keydown', e => { keys[e.key] = true; e.preventDefault(); });
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// Touch dpad
+document.querySelectorAll('.dpad-btn').forEach(btn => {
+  const dir = btn.dataset.dir;
+  btn.addEventListener('touchstart', e => { e.preventDefault(); touchDirs[dir] = true; });
+  btn.addEventListener('touchend', e => { e.preventDefault(); touchDirs[dir] = false; });
+  btn.addEventListener('touchcancel', e => { touchDirs[dir] = false; });
+});
+
+function getInput() {
+  let dx = 0, dy = 0;
+  if (keys['ArrowUp'] || keys['w'] || keys['W'] || touchDirs.up) dy = -1;
+  if (keys['ArrowDown'] || keys['s'] || keys['S'] || touchDirs.down) dy = 1;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A'] || touchDirs.left) dx = -1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D'] || touchDirs.right) dx = 1;
+  return { dx, dy };
+}
+
+// ---- CAMERA ----
+let camX = 0, camY = 0;
+
+function updateCamera() {
+  const targetX = cat.x * TS - canvas.width / 2 + TS / 2;
+  const targetY = cat.y * TS - canvas.height / 2 + TS / 2;
+  camX += (targetX - camX) * 0.1;
+  camY += (targetY - camY) * 0.1;
+  camX = Math.max(0, Math.min(camX, MAP_W * TS - canvas.width));
+  camY = Math.max(0, Math.min(camY, MAP_H * TS - canvas.height));
+}
+
+// ---- RESIZE ----
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Show dpad on touch devices
+if ('ontouchstart' in window) {
+  document.getElementById('dpad').style.display = 'block';
+}
+
+// ---- GAME LOOP ----
+let lastTime = 0;
+let running = false;
+let sardineRespawnTimer = 0;
+
+function update(dt) {
+  const input = getInput();
+  cat.moving = input.dx !== 0 || input.dy !== 0;
+
+  if (cat.moving) {
+    // Direction
+    if (input.dy < 0) cat.dir = 1;
+    else if (input.dy > 0) cat.dir = 0;
+    else if (input.dx < 0) cat.dir = 2;
+    else if (input.dx > 0) cat.dir = 3;
+
+    // Movement with collision
+    const nx = cat.x + input.dx * cat.speed * dt;
+    const ny = cat.y + input.dy * cat.speed * dt;
+
+    // Check collision for x movement
+    const checkX = input.dx > 0 ? Math.floor(nx + 0.35) : Math.floor(nx - 0.35);
+    if (isWalkable(checkX, Math.floor(cat.y + 0.35)) && isWalkable(checkX, Math.floor(cat.y - 0.35))) {
+      cat.x = nx;
+    }
+    // Check collision for y movement
+    const checkY = input.dy > 0 ? Math.floor(ny + 0.35) : Math.floor(ny - 0.35);
+    if (isWalkable(Math.floor(cat.x + 0.35), checkY) && isWalkable(Math.floor(cat.x - 0.35), checkY)) {
+      cat.y = ny;
+    }
+
+    // Clamp to map
+    cat.x = Math.max(0.4, Math.min(cat.x, MAP_W - 0.4));
+    cat.y = Math.max(0.4, Math.min(cat.y, MAP_H - 0.4));
+
+    // Animation
+    cat.frameTimer += dt;
+    if (cat.frameTimer > 0.15) {
+      cat.frame = 1 - cat.frame;
+      cat.frameTimer = 0;
+    }
+  }
+
+  // Sardine collection
+  for (let i = sardines.length - 1; i >= 0; i--) {
+    const s = sardines[i];
+    const dist = Math.hypot(cat.x - s.x, cat.y - s.y);
+    if (dist < 0.7) {
+      spawnParticles(s.x * TS, s.y * TS);
+      sardines.splice(i, 1);
+      sardineCount++;
+      document.getElementById('sardine-count').textContent = `Sardines: ${sardineCount}`;
+    }
+  }
+
+  // Respawn sardines
+  if (sardines.length < MAX_SARDINES) {
+    sardineRespawnTimer += dt;
+    if (sardineRespawnTimer > 3) {
+      spawnSardine();
+      sardineRespawnTimer = 0;
+    }
+  }
+
+  updateCamera();
+  updateParticles(dt);
+  updateLeaves(dt);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Background
+  ctx.fillStyle = '#4a7a5b';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.translate(-Math.round(camX), -Math.round(camY));
+
+  // Draw visible tiles
+  const startX = Math.max(0, Math.floor(camX / TS));
+  const startY = Math.max(0, Math.floor(camY / TS));
+  const endX = Math.min(MAP_W, Math.ceil((camX + canvas.width) / TS) + 1);
+  const endY = Math.min(MAP_H, Math.ceil((camY + canvas.height) / TS) + 1);
+
+  for (let y = startY; y < endY; y++) {
+    for (let x = startX; x < endX; x++) {
+      drawTile(x, y, map[y][x]);
+    }
+  }
+
+  // Draw sardines
+  for (const s of sardines) {
+    drawSardine(s.x * TS - 6*SCALE, s.y * TS - 4*SCALE, s.bobOffset);
+  }
+
+  // Draw cat
+  drawCat(cat.x * TS - 8*SCALE, cat.y * TS - 8*SCALE);
+
+  // Draw leaves on top
+  drawLeaves(Math.round(camX), Math.round(camY));
+  drawParticles(Math.round(camX), Math.round(camY));
+
+  ctx.restore();
+}
+
+function gameLoop(time) {
+  if (!running) return;
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ---- START ----
+document.getElementById('start-btn').addEventListener('click', () => {
+  document.getElementById('title-screen').style.display = 'none';
+  running = true;
+  lastTime = performance.now();
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
